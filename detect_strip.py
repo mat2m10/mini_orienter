@@ -108,7 +108,7 @@ class DeBruijnDetector:
         # Cell i centre is at angle: i * 2pi/n_cells  (starting from angle 0 = right)
         self.obj_points_3d = self._make_3d_points()
 
-        print(f"[DeBruijn] {n_cells} cells, window={n_window}, radius={base_radius_mm}mm")
+        print(f"[DeBruijn] {self.n_cells} cells, window={n_window}, radius={base_radius_mm}mm")
         print(f"[DeBruijn] Sequence: {''.join(map(str, self.sequence))}")
 
     def _make_3d_points(self):
