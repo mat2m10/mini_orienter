@@ -18,6 +18,9 @@ Usage:
 Arguments:
     --video        Input video file
     --marker-size  Physical side length of each marker in mm
+    --handle-radius  Distance from the handle axis to each marker's surface
+                   in mm (default: estimated as 2*marker_size/pi, i.e. four
+                   markers wrapping the full circumference)
     --camera       Optional camera.yml from calibrate.py (improves accuracy)
     --out          Output video (default: stabilised.mp4)
     --reference    Frame number to use as locked reference pose (default: auto)
@@ -115,15 +118,21 @@ def make_detector():
 # Pose from a single detected marker
 # ---------------------------------------------------------------------------
 
-def pose_from_marker(corners, marker_id, marker_size_mm, cam_mat, dist):
+def pose_from_marker(corners, marker_id, marker_size_mm, cam_mat, dist,
+                     handle_radius_mm=0.0):
     """
     Estimate the pose of the HANDLE given a detected marker.
 
     We know:
       - The marker's pose relative to the camera (solvePnP)
-      - The marker's pose relative to the handle (from FACE_ANGLES)
+      - The marker's pose relative to the handle: rotated by its face angle
+        around the handle's Y axis and pushed out by handle_radius_mm along
+        its own normal (marker +Z, pointing away from the axis)
 
     So: handle_pose = marker_pose * inv(marker_on_handle)
+
+    The handle origin returned here is on the handle axis, so every marker
+    ID yields the same handle pose and switching markers does not jump.
     """
     half = marker_size_mm / 2.0
 
@@ -151,9 +160,12 @@ def pose_from_marker(corners, marker_id, marker_size_mm, cam_mat, dist):
     R_marker, _ = cv2.Rodrigues(rvec)
     R_face = marker_offset_rotation(face_angle)
 
-    # Handle frame = camera -> marker -> (marker -> handle)
+    # Marker in handle frame: p_handle = R_face @ p_marker + R_face @ [0,0,r]
+    # Marker in camera frame: p_cam = R_marker @ p_marker + tvec
+    # => p_cam = (R_marker @ R_face.T) @ p_handle + tvec - R_marker @ [0,0,r]
     R_handle = R_marker @ R_face.T
-    t_handle = tvec  # translation is the same (marker is on handle surface)
+    offset = np.array([[0.0], [0.0], [float(handle_radius_mm)]])
+    t_handle = tvec.reshape(3, 1) - R_marker @ offset
 
     rvec_handle, _ = cv2.Rodrigues(R_handle)
     return rvec_handle, t_handle
@@ -215,6 +227,15 @@ def stabilise(args):
     else:
         cam_mat, dist = default_camera(width, height)
 
+    # Distance from the handle axis to the marker surfaces
+    if args.handle_radius is None:
+        handle_radius = 2.0 * args.marker_size / np.pi
+        print(f"Handle radius not given — estimated {handle_radius:.2f} mm "
+              f"(4 markers of {args.marker_size} mm around the circumference). "
+              f"Pass --handle-radius for accuracy.")
+    else:
+        handle_radius = args.handle_radius
+
     # Detector
     detector, dictionary = make_detector()
 
@@ -244,7 +265,8 @@ def stabilise(args):
             for i, mid in enumerate(ids.ravel()):
                 if mid in MARKER_IDS:
                     rv, tv = pose_from_marker(
-                        [corners[i]], mid, args.marker_size, cam_mat, dist
+                        [corners[i]], mid, args.marker_size, cam_mat, dist,
+                        handle_radius
                     )
                     if rv is not None:
                         ref_rvec = rv
@@ -289,7 +311,8 @@ def stabilise(args):
                 if mid not in MARKER_IDS:
                     continue
                 rv, tv = pose_from_marker(
-                    [corners[i]], mid, args.marker_size, cam_mat, dist
+                    [corners[i]], mid, args.marker_size, cam_mat, dist,
+                    handle_radius
                 )
                 if rv is None:
                     continue
@@ -363,6 +386,9 @@ if __name__ == "__main__":
     parser.add_argument("--video",       required=True)
     parser.add_argument("--marker-size", type=float, required=True,
                         help="Marker side length in mm")
+    parser.add_argument("--handle-radius", type=float, default=None,
+                        help="Handle axis to marker surface distance in mm "
+                             "(default: 2*marker_size/pi)")
     parser.add_argument("--camera",      default=None)
     parser.add_argument("--out",         default="stabilised.mp4")
     parser.add_argument("--reference",   type=int, default=0,
