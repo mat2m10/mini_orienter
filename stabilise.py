@@ -27,19 +27,9 @@ Options:
 import cv2
 import numpy as np
 import argparse
-import os
 import sys
+from common import FrameSink, load_camera, open_video, print_progress
 from detect_strip import DeBruijnDetector
-
-
-def load_camera(path):
-    """Load camera matrix and distortion coeffs from calibration file."""
-    fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
-    cam = fs.getNode("camera_matrix").mat()
-    dist = fs.getNode("dist_coeffs").mat()
-    fs.release()
-    print(f"Loaded camera calibration from {path}")
-    return cam, dist
 
 
 def rvec_tvec_to_matrix(rvec, tvec):
@@ -91,25 +81,9 @@ def stabilise(args):
         debug=args.debug
     )
 
-    # Open video
-    cap = cv2.VideoCapture(args.video)
-    if not cap.isOpened():
-        print(f"Cannot open: {args.video}")
-        sys.exit(1)
-
-    fps    = cap.get(cv2.CAP_PROP_FPS) or 30
-    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    print(f"Video: {width}x{height} @ {fps:.1f}fps, {total} frames")
-
-    # Output video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(args.out, fourcc, fps, (width, height))
-
-    # Optional frames directory
-    if args.frames_dir:
-        os.makedirs(args.frames_dir, exist_ok=True)
+    # Open video and output (mp4 + optional PNG frames)
+    cap, fps, width, height, total = open_video(args.video)
+    out = FrameSink(args.out, fps, (width, height), args.frames_dir)
 
     # --- Pass 1: find the reference frame ---
     print(f"\nSeeking reference frame {args.reference}...")
@@ -216,10 +190,7 @@ def stabilise(args):
         cv2.putText(warp_frame, f"[{frame_idx:04d}] {status} conf={conf:.2f}",
                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
 
-        out.write(warp_frame)
-
-        if args.frames_dir:
-            cv2.imwrite(f"{args.frames_dir}/frame_{frame_idx:04d}.png", warp_frame)
+        out.write(warp_frame, frame_idx)
 
         if args.debug:
             cv2.imshow("Stabilised", warp_frame)
@@ -228,10 +199,8 @@ def stabilise(args):
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
-        if frame_idx % 30 == 0:
-            pct = 100 * frame_idx / max(total, 1)
-            print(f"  {frame_idx}/{total} ({pct:.0f}%) — "
-                  f"stabilised={n_stabilised} fallback={n_fallback} skipped={n_skipped}")
+        print_progress(frame_idx, total, stabilised=n_stabilised,
+                       fallback=n_fallback, skipped=n_skipped)
 
         frame_idx += 1
 

@@ -29,8 +29,9 @@ import cv2
 import cv2.aruco as aruco
 import numpy as np
 import argparse
-import os
 import sys
+from common import (FrameSink, default_camera, load_camera,
+                    make_aruco_detector, open_video, print_progress)
 
 
 # ---------------------------------------------------------------------------
@@ -53,62 +54,6 @@ def marker_offset_rotation(face_angle_deg):
         [         0, 1,         0],
         [-np.sin(a), 0, np.cos(a)],
     ], dtype=np.float64)
-
-
-# ---------------------------------------------------------------------------
-# Camera calibration loader
-# ---------------------------------------------------------------------------
-
-def load_camera(path):
-    fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
-    cam  = fs.getNode("camera_matrix").mat()
-    dist = fs.getNode("dist_coeffs").mat()
-    fs.release()
-    print(f"Loaded calibration from {path}")
-    return cam, dist
-
-
-def default_camera(w, h):
-    """
-    Rough camera matrix when no calibration file is available.
-    Assumes focal length ≈ image width (reasonable for phone cameras).
-    Good enough for stabilisation, not for metric measurements.
-    """
-    f = w  # focal length estimate in pixels
-    cam = np.array([
-        [f,   0, w/2],
-        [0,   f, h/2],
-        [0,   0,   1],
-    ], dtype=np.float64)
-    dist = np.zeros((4,1), dtype=np.float64)
-    print("No calibration file — using estimated camera matrix (focal = image width).")
-    print("For better results run: python calibrate.py --video checkerboard.mp4")
-    return cam, dist
-
-
-# ---------------------------------------------------------------------------
-# ArUco setup
-# ---------------------------------------------------------------------------
-
-def make_detector():
-    """Create ArUco detector with tuned parameters for small hand-drawn markers."""
-    dictionary = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
-    params = aruco.DetectorParameters()
-
-    # More aggressive corner refinement — helps with pencil-drawn or printed markers
-    params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
-
-    # Allow smaller markers (important for a cork-sized handle)
-    params.minMarkerPerimeterRate = 0.03
-    params.maxMarkerPerimeterRate = 4.0
-
-    # More lenient thresholding — helps with uneven pencil/print quality
-    params.adaptiveThreshWinSizeMin  = 3
-    params.adaptiveThreshWinSizeMax  = 53
-    params.adaptiveThreshWinSizeStep = 10
-
-    detector = aruco.ArucoDetector(dictionary, params)
-    return detector, dictionary
 
 
 # ---------------------------------------------------------------------------
@@ -198,16 +143,7 @@ def poses_to_homography(rvec_ref, tvec_ref, rvec_cur, tvec_cur,
 # ---------------------------------------------------------------------------
 
 def stabilise(args):
-    cap = cv2.VideoCapture(args.video)
-    if not cap.isOpened():
-        print(f"Cannot open: {args.video}")
-        sys.exit(1)
-
-    fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    print(f"Video: {width}x{height} @ {fps:.1f}fps, {total} frames")
+    cap, fps, width, height, total = open_video(args.video)
 
     # Camera matrix
     if args.camera:
@@ -216,13 +152,10 @@ def stabilise(args):
         cam_mat, dist = default_camera(width, height)
 
     # Detector
-    detector, dictionary = make_detector()
+    detector, dictionary = make_aruco_detector()
 
-    # Output
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(args.out, fourcc, fps, (width, height))
-    if args.frames_dir:
-        os.makedirs(args.frames_dir, exist_ok=True)
+    # Output (mp4 + optional PNG frames)
+    out = FrameSink(args.out, fps, (width, height), args.frames_dir)
 
     # ---- Find reference frame ----
     ref_rvec = None
@@ -327,22 +260,15 @@ def stabilise(args):
         cv2.putText(warp_frame, f"[{frame_idx:04d}] {status_text}",
                     (10, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
 
-        out.write(warp_frame)
-
-        if args.frames_dir:
-            cv2.imwrite(
-                f"{args.frames_dir}/frame_{frame_idx:04d}.png", warp_frame
-            )
+        out.write(warp_frame, frame_idx)
 
         if args.debug:
             cv2.imshow("Stabilised", warp_frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
-        if frame_idx % 30 == 0:
-            pct = 100 * frame_idx / max(total, 1)
-            print(f"  {frame_idx}/{total} ({pct:.0f}%)  "
-                  f"ok={n_stabilised} held={n_fallback} lost={n_lost}")
+        print_progress(frame_idx, total, ok=n_stabilised,
+                       held=n_fallback, lost=n_lost)
 
         frame_idx += 1
 

@@ -10,8 +10,8 @@ Usage:
 
 import cv2
 import cv2.aruco as aruco
-import numpy as np
 import argparse
+from common import make_aruco_detector
 
 DICTS = {
     "4X4_50":     aruco.DICT_4X4_50,
@@ -26,17 +26,13 @@ def detect(image_path, dict_name="4X4_50"):
         print(f"Cannot open: {image_path}")
         return
 
-    dictionary = aruco.getPredefinedDictionary(DICTS[dict_name])
-    params = aruco.DetectorParameters()
-
-    # Looser params — helps with hand-drawn markers
-    params.adaptiveThreshWinSizeMin  = 3
-    params.adaptiveThreshWinSizeMax  = 53
-    params.adaptiveThreshWinSizeStep = 10
-    params.minMarkerPerimeterRate    = 0.02
-    params.polygonalApproxAccuracyRate = 0.08   # more forgiving of wobbly edges
-
-    detector = aruco.ArucoDetector(dictionary, params)
+    # Looser params than the stabiliser — helps with hand-drawn markers
+    detector, _ = make_aruco_detector(
+        DICTS[dict_name],
+        min_perimeter_rate=0.02,
+        subpix=False,
+        polygonal_approx_rate=0.08,   # more forgiving of wobbly edges
+    )
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     corners, ids, rejected = detector.detectMarkers(gray)
 
