@@ -23,6 +23,10 @@ Arguments:
     --reference    Frame number to use as locked reference pose (default: auto)
     --debug        Show live annotated preview
     --frames-dir   Also save individual PNG frames here
+    --smooth       Pose smoothing weight in (0, 1]; 1 = off (default).
+                   e.g. 0.5 averages SLERP-wise with the previous pose
+    --max-extrapolate  Frames to extrapolate the last motion through a
+                   marker dropout before holding (default 0 = hold)
 """
 
 import cv2
@@ -31,6 +35,7 @@ import numpy as np
 import argparse
 import os
 import sys
+from pose_smoothing import PoseSmoother
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +276,13 @@ def stabilise(args):
     last_H       = None
     frame_idx    = 0
 
+    # Optional temporal smoothing / dropout extrapolation of the handle pose
+    smoother = None
+    if args.smooth < 1.0 or args.max_extrapolate > 0:
+        smoother = PoseSmoother(args.smooth, args.max_extrapolate)
+        print(f"Pose smoothing: alpha={args.smooth}, "
+              f"extrapolate up to {args.max_extrapolate} frames")
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -293,6 +305,8 @@ def stabilise(args):
                 )
                 if rv is None:
                     continue
+                if smoother is not None:
+                    rv, tv = smoother.update(rv, tv)
 
                 H = poses_to_homography(
                     ref_rvec, ref_tvec, rv, tv,
@@ -314,8 +328,22 @@ def stabilise(args):
                         )
                     break
 
+        if not found and smoother is not None:
+            pose = smoother.predict()
+            if pose is not None:
+                H = poses_to_homography(ref_rvec, ref_tvec, *pose,
+                                        cam_mat, dist, args.marker_size)
+                if H is not None:
+                    last_H = H
+                    extrapolating = smoother.missed <= args.max_extrapolate
+                    status_text = ("PREDICTED (no marker)" if extrapolating
+                                   else "HELD (no marker)")
+
         if not found:
-            if last_H is not None:
+            if status_text != "LOST":
+                warp_frame = cv2.warpPerspective(frame, last_H, (width, height))
+                n_fallback += 1
+            elif last_H is not None:
                 warp_frame = cv2.warpPerspective(frame, last_H, (width, height))
                 status_text = "HELD (no marker)"
                 n_fallback += 1
@@ -369,5 +397,9 @@ if __name__ == "__main__":
                         help="Start searching for reference pose from this frame")
     parser.add_argument("--debug",       action="store_true")
     parser.add_argument("--frames-dir",  default=None)
+    parser.add_argument("--smooth",      type=float, default=1.0,
+                        help="Pose smoothing weight in (0,1]; 1 = off")
+    parser.add_argument("--max-extrapolate", type=int, default=0,
+                        help="Frames to extrapolate motion through a dropout")
     args = parser.parse_args()
     stabilise(args)
