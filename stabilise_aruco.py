@@ -60,10 +60,19 @@ def marker_offset_rotation(face_angle_deg):
 # ---------------------------------------------------------------------------
 
 def load_camera(path):
+    if not os.path.isfile(path):
+        sys.exit(f"Camera file not found: {path}")
     fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
+    if not fs.isOpened():
+        sys.exit(f"Cannot read camera file: {path}")
     cam  = fs.getNode("camera_matrix").mat()
     dist = fs.getNode("dist_coeffs").mat()
     fs.release()
+    if cam is None or cam.shape != (3, 3):
+        sys.exit(f"{path}: missing or invalid 'camera_matrix' "
+                 f"(expected 3x3, run calibrate.py)")
+    if dist is None or dist.size == 0:
+        sys.exit(f"{path}: missing 'dist_coeffs' (run calibrate.py)")
     print(f"Loaded calibration from {path}")
     return cam, dist
 
@@ -221,6 +230,9 @@ def stabilise(args):
     # Output
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(args.out, fourcc, fps, (width, height))
+    if not out.isOpened():
+        print(f"Cannot open output video for writing: {args.out}")
+        sys.exit(1)
     if args.frames_dir:
         os.makedirs(args.frames_dir, exist_ok=True)
 
@@ -233,7 +245,9 @@ def stabilise(args):
     start_search = args.reference if args.reference >= 0 else 0
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_search)
 
-    for search_idx in range(start_search, min(start_search + 120, total)):
+    # Do not bound this by CAP_PROP_FRAME_COUNT: some containers/backends
+    # report 0 frames. The loop stops at end of video via cap.read().
+    for search_idx in range(start_search, start_search + 120):
         ret, frame = cap.read()
         if not ret:
             break
