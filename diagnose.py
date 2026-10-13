@@ -6,7 +6,7 @@ Saves several debug images so you can see exactly where it's failing.
 
 Usage:
     python diagnose.py --video data/knight.mp4 --frame 0
-    python diagnose.py --video data/knight.mp4 --frame 10 --all-frames
+    python diagnose.py --video data/knight.mp4 --frame 10 --out debug_frames
 """
 
 import cv2
