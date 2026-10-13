@@ -183,8 +183,10 @@ class DeBruijnDetector:
             self._draw_debug(debug_frame, ellipse, sample_pts_2d,
                              bits, start_idx, rvec, tvec)
 
+        # 'found' means the strip was located and decoded. rvec/tvec are
+        # None without a camera matrix; callers then use the 2D path.
         return {
-            'found': rvec is not None,
+            'found': True,
             'rvec': rvec,
             'tvec': tvec,
             'ellipse': ellipse,
