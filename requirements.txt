@@ -1,0 +1,5 @@
+# aruco.ArucoDetector, aruco.DetectorParameters() and aruco.generateImageMarker
+# only exist from OpenCV 4.7 on. Use the -headless variant on servers/CI.
+# Do not install opencv-python alongside this package: both provide cv2.
+opencv-contrib-python>=4.7
+numpy>=1.21

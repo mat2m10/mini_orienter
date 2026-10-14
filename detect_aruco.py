@@ -11,14 +11,7 @@ Usage:
 import cv2
 import cv2.aruco as aruco
 import argparse
-from common import make_aruco_detector
-
-DICTS = {
-    "4X4_50":     aruco.DICT_4X4_50,
-    "4X4_100":    aruco.DICT_4X4_100,
-    "5X5_50":     aruco.DICT_5X5_50,
-    "6X6_50":     aruco.DICT_6X6_50,
-}
+from common import DICTS, make_aruco_detector
 
 def detect(image_path, dict_name="4X4_50"):
     frame = cv2.imread(image_path)

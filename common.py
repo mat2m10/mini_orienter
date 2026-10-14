@@ -19,11 +19,23 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 def load_camera(path):
-    """Load camera matrix and distortion coeffs from a calibrate.py file."""
+    """
+    Load camera matrix and distortion coeffs from a calibrate.py file.
+    Exits with a clear message if the file is missing or incomplete.
+    """
+    if not os.path.isfile(path):
+        sys.exit(f"Camera file not found: {path}")
     fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
+    if not fs.isOpened():
+        sys.exit(f"Cannot read camera file: {path}")
     cam = fs.getNode("camera_matrix").mat()
     dist = fs.getNode("dist_coeffs").mat()
     fs.release()
+    if cam is None or cam.shape != (3, 3):
+        sys.exit(f"{path}: missing or invalid 'camera_matrix' "
+                 f"(expected 3x3, run calibrate.py)")
+    if dist is None or dist.size == 0:
+        sys.exit(f"{path}: missing 'dist_coeffs' (run calibrate.py)")
     print(f"Loaded camera calibration from {path}")
     return cam, dist
 
@@ -49,6 +61,21 @@ def default_camera(w, h):
 # ---------------------------------------------------------------------------
 # ArUco
 # ---------------------------------------------------------------------------
+
+# Dictionary names accepted by --dict (same names as generate_aruco)
+DICTS = {
+    "4X4_50":  aruco.DICT_4X4_50,
+    "4X4_100": aruco.DICT_4X4_100,
+    "4X4_250": aruco.DICT_4X4_250,
+    "5X5_50":  aruco.DICT_5X5_50,
+    "5X5_100": aruco.DICT_5X5_100,
+    "5X5_250": aruco.DICT_5X5_250,
+    "6X6_50":  aruco.DICT_6X6_50,
+    "6X6_100": aruco.DICT_6X6_100,
+    "6X6_250": aruco.DICT_6X6_250,
+    "ORIGINAL": aruco.DICT_ARUCO_ORIGINAL,
+}
+
 
 def make_aruco_detector(dict_id=aruco.DICT_4X4_50,
                         min_perimeter_rate=0.03,
@@ -101,22 +128,33 @@ def open_video(path):
 
 
 class FrameSink:
-    """Writes output frames to an mp4 and, optionally, to numbered PNGs."""
+    """
+    Writes output frames to an mp4 and, optionally, to numbered PNGs.
+    out_path=None skips the video (PNGs only, if frames_dir is set).
+    Exits if the video writer cannot be opened.
+    """
 
     def __init__(self, out_path, fps, size, frames_dir=None):
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        self.writer = cv2.VideoWriter(out_path, fourcc, fps, size)
+        self.writer = None
+        if out_path is not None:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            self.writer = cv2.VideoWriter(out_path, fourcc, fps, size)
+            if not self.writer.isOpened():
+                print(f"Cannot open output video for writing: {out_path}")
+                sys.exit(1)
         self.frames_dir = frames_dir
         if frames_dir:
             os.makedirs(frames_dir, exist_ok=True)
 
     def write(self, frame, frame_idx):
-        self.writer.write(frame)
+        if self.writer is not None:
+            self.writer.write(frame)
         if self.frames_dir:
             cv2.imwrite(f"{self.frames_dir}/frame_{frame_idx:04d}.png", frame)
 
     def release(self):
-        self.writer.release()
+        if self.writer is not None:
+            self.writer.release()
 
 
 def print_progress(frame_idx, total, every=30, **counts):

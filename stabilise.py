@@ -32,15 +32,6 @@ from common import FrameSink, load_camera, open_video, print_progress
 from detect_strip import DeBruijnDetector
 
 
-def rvec_tvec_to_matrix(rvec, tvec):
-    """Convert OpenCV pose to 4x4 homogeneous matrix."""
-    R, _ = cv2.Rodrigues(rvec)
-    M = np.eye(4)
-    M[:3,:3] = R
-    M[:3, 3] = tvec.ravel()
-    return M
-
-
 def compute_warp_homography(ref_pts, cur_pts):
     """
     2D fallback: compute homography between reference and current
@@ -100,7 +91,6 @@ def stabilise(args):
 
     ref_rvec   = ref_result.get('rvec')
     ref_tvec   = ref_result.get('tvec')
-    ref_pts    = ref_result.get('debug_frame')  # not used here
     ref_ellipse = ref_result.get('ellipse')
     print(f"Reference pose found. start_idx={ref_result['start_idx']}, "
           f"confidence={ref_result['confidence']:.2f}")
@@ -120,16 +110,13 @@ def stabilise(args):
 
         result = detector.detect(frame)
         warp_frame = frame.copy()
+        H = None
 
         if result['found']:
             if use_3d and ref_rvec is not None and result['rvec'] is not None:
                 # --- 3D pose stabilisation ---
-                # Compute relative transform: ref_pose * inv(cur_pose)
-                M_ref = rvec_tvec_to_matrix(ref_rvec, ref_tvec)
-                M_cur = rvec_tvec_to_matrix(result['rvec'], result['tvec'])
-                M_rel = M_ref @ np.linalg.inv(M_cur)
-
-                # Project 4 base corners to get homography
+                # Project 4 base corners with both poses; the homography
+                # between the two projections is the stabilising warp.
                 corners_3d = np.array([
                     [ args.radius,  args.radius, 0],
                     [-args.radius,  args.radius, 0],
@@ -138,8 +125,6 @@ def stabilise(args):
                 ], dtype=np.float32)
 
                 # Project using current pose
-                cur_r, _ = cv2.Rodrigues(M_cur[:3,:3])
-                cur_t    = M_cur[:3, 3]
                 pts_cur, _ = cv2.projectPoints(corners_3d, result['rvec'],
                                                result['tvec'], cam_mat, dist_coeffs)
 
@@ -151,38 +136,26 @@ def stabilise(args):
                 pts_ref = pts_ref.reshape(-1,2).astype(np.float32)
 
                 H, _ = cv2.findHomography(pts_cur, pts_ref)
-                if H is not None:
-                    last_H = H
-                    warp_frame = cv2.warpPerspective(frame, H, (width, height))
-                    n_stabilised += 1
 
-            else:
+            elif ref_ellipse is not None and result.get('ellipse') is not None:
                 # --- 2D homography fallback ---
                 # Use cell sample positions directly
                 # This works well for small camera movements / rotations
-                if ref_ellipse is not None and result.get('ellipse') is not None:
-                    ref_cell_pts = _ellipse_sample_pts(ref_ellipse, detector.n_cells)
-                    cur_cell_pts = _ellipse_sample_pts(result['ellipse'], detector.n_cells)
+                H = ellipse_cell_homography(
+                    ref_ellipse, ref_result['start_idx'],
+                    result['ellipse'], result['start_idx'],
+                    detector.n_cells)
 
-                    # Align by start_idx so we match corresponding cells
-                    si = result.get('start_idx', 0)
-                    cur_aligned = cur_cell_pts[si:] + cur_cell_pts[:si]
-
-                    H = compute_warp_homography(ref_cell_pts, cur_aligned)
-                    if H is not None:
-                        last_H = H
-                        warp_frame = cv2.warpPerspective(frame, H, (width, height))
-                        n_stabilised += 1
-                    else:
-                        n_fallback += 1
-
+        if H is not None:
+            last_H = H
+            warp_frame = cv2.warpPerspective(frame, H, (width, height))
+            n_stabilised += 1
+        elif last_H is not None:
+            # Strip lost or no usable warp this frame — carry forward last one
+            warp_frame = cv2.warpPerspective(frame, last_H, (width, height))
+            n_fallback += 1
         else:
-            # Strip not found — carry forward last known warp
-            if last_H is not None:
-                warp_frame = cv2.warpPerspective(frame, last_H, (width, height))
-                n_fallback += 1
-            else:
-                n_skipped += 1
+            n_skipped += 1
 
         # Overlay status
         status = "OK" if result['found'] else "LOST"
@@ -214,6 +187,31 @@ def stabilise(args):
     print(f"  Fallback   : {n_fallback}  (strip lost, used last good warp)")
     print(f"  Skipped    : {n_skipped}   (no warp available)")
     print(f"  Output     : {args.out}")
+
+
+def cells_in_sequence_order(sample_pts, start_idx):
+    """
+    Reorder per-sample points so that index c holds the point of sequence
+    cell c. The detector reports start_idx such that sample s shows cell
+    (start_idx + s) % n, hence cell c is at sample (c - start_idx) % n.
+    """
+    n = len(sample_pts)
+    return [sample_pts[(c - start_idx) % n] for c in range(n)]
+
+
+def ellipse_cell_homography(ref_ellipse, ref_start_idx,
+                            cur_ellipse, cur_start_idx, n_cells):
+    """
+    2D warp from the current frame to the reference frame, pairing the
+    sample points of both strip ellipses by De Bruijn cell index.
+    Both frames must be re-indexed by their own start_idx: the fitted
+    ellipse's parametrisation origin is arbitrary in each frame.
+    """
+    ref_pts = cells_in_sequence_order(
+        _ellipse_sample_pts(ref_ellipse, n_cells), ref_start_idx)
+    cur_pts = cells_in_sequence_order(
+        _ellipse_sample_pts(cur_ellipse, n_cells), cur_start_idx)
+    return compute_warp_homography(ref_pts, cur_pts)
 
 
 def _ellipse_sample_pts(ellipse, n):
