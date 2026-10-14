@@ -6,12 +6,14 @@ a cylindrical handle/base. At least one marker is always visible
 regardless of orientation.
 
 Setup:
-  - Print markers_sheet.py output, cut into 4 strips
+  - Print print_markers.py output (markers.svg), cut out the 4 markers
   - Glue them around your cork/handle at 90° intervals
   - Each marker is a different ID so OpenCV knows which face it's seeing
   - Other layouts: N markers on a regular N-sided prism (e.g. the
     hexagonal fiducial from generate_aruco: --faces 6), IDs first-id ..
-    first-id+N-1 in order around the axis, all upright, same direction
+    first-id+N-1 in order around the axis, all upright, same direction.
+    Order: with face 0 facing you, face 1 is on its right (IDs increase
+    counter-clockwise seen from the top of the handle, +k*360/N about +Y)
 
 Usage:
     python stabilise_aruco.py --video data/knight.mp4 --marker-size 20
@@ -22,6 +24,9 @@ Usage:
 Arguments:
     --video        Input video file
     --marker-size  Physical side length of each marker in mm
+    --handle-radius  Distance from the handle axis to each marker's surface
+                   in mm (default: estimated as marker_size / (2 tan(pi/faces)),
+                   the apothem of a prism whose faces are one marker wide)
     --camera       Optional camera.yml from calibrate.py (improves accuracy)
     --out          Output video (default: stabilised.mp4)
     --reference    Frame number to use as locked reference pose (default: auto)
@@ -30,6 +35,10 @@ Arguments:
     --faces        Number of marker faces around the axis (default 4)
     --first-id     Marker ID on face 0; faces use consecutive IDs (default 0)
     --dict         ArUco dictionary, e.g. 4X4_50 (default), 5X5_100, 6X6_250
+    --smooth       Pose smoothing weight in (0, 1]; 1 = off (default).
+                   e.g. 0.5 averages SLERP-wise with the previous pose
+    --max-extrapolate  Frames to extrapolate the last motion through a
+                   marker dropout before holding (default 0 = hold)
 """
 
 import cv2
@@ -38,6 +47,7 @@ import numpy as np
 import argparse
 import os
 import sys
+from pose_smoothing import PoseSmoother
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +84,19 @@ def face_layout(n_faces=4, first_id=0):
 
 MARKER_IDS, FACE_ANGLES = face_layout(4)   # [0..3], [0, 90, 180, 270]
 
+
+def estimate_handle_radius(marker_size_mm, n_faces=4):
+    """
+    Default distance from the handle axis to the marker surfaces when
+    --handle-radius is not given: the apothem of a regular N-sided prism
+    whose faces are exactly one marker wide, s / (2 tan(pi/N)).
+    Markers with a white margin or glued on a round handle sit further out,
+    so pass --handle-radius when the real value is known.
+    """
+    if n_faces < 3:
+        raise ValueError("a handle radius can only be estimated for >= 3 faces")
+    return marker_size_mm / (2.0 * np.tan(np.pi / n_faces))
+
 def marker_offset_rotation(face_angle_deg):
     """
     Rotation matrix for a marker on the face at face_angle_deg around Y axis.
@@ -92,10 +115,19 @@ def marker_offset_rotation(face_angle_deg):
 # ---------------------------------------------------------------------------
 
 def load_camera(path):
+    if not os.path.isfile(path):
+        sys.exit(f"Camera file not found: {path}")
     fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
+    if not fs.isOpened():
+        sys.exit(f"Cannot read camera file: {path}")
     cam  = fs.getNode("camera_matrix").mat()
     dist = fs.getNode("dist_coeffs").mat()
     fs.release()
+    if cam is None or cam.shape != (3, 3):
+        sys.exit(f"{path}: missing or invalid 'camera_matrix' "
+                 f"(expected 3x3, run calibrate.py)")
+    if dist is None or dist.size == 0:
+        sys.exit(f"{path}: missing 'dist_coeffs' (run calibrate.py)")
     print(f"Loaded calibration from {path}")
     return cam, dist
 
@@ -148,15 +180,20 @@ def make_detector(dict_id=aruco.DICT_4X4_50):
 # ---------------------------------------------------------------------------
 
 def pose_from_marker(corners, marker_id, marker_size_mm, cam_mat, dist,
-                     marker_ids=None, face_angles=None):
+                     handle_radius_mm=0.0, marker_ids=None, face_angles=None):
     """
     Estimate the pose of the HANDLE given a detected marker.
 
     We know:
       - The marker's pose relative to the camera (solvePnP)
-      - The marker's pose relative to the handle (from FACE_ANGLES)
+      - The marker's pose relative to the handle: rotated by its face angle
+        around the handle's Y axis and pushed out by handle_radius_mm along
+        its own normal (marker +Z, pointing away from the axis)
 
     So: handle_pose = marker_pose * inv(marker_on_handle)
+
+    The handle origin returned here is on the handle axis, so every marker
+    ID yields the same handle pose and switching markers does not jump.
     """
     half = marker_size_mm / 2.0
 
@@ -187,9 +224,12 @@ def pose_from_marker(corners, marker_id, marker_size_mm, cam_mat, dist,
     R_marker, _ = cv2.Rodrigues(rvec)
     R_face = marker_offset_rotation(face_angle)
 
-    # Handle frame = camera -> marker -> (marker -> handle)
+    # Marker in handle frame: p_handle = R_face @ p_marker + R_face @ [0,0,r]
+    # Marker in camera frame: p_cam = R_marker @ p_marker + tvec
+    # => p_cam = (R_marker @ R_face.T) @ p_handle + tvec - R_marker @ [0,0,r]
     R_handle = R_marker @ R_face.T
-    t_handle = tvec  # translation is the same (marker is on handle surface)
+    offset = np.array([[0.0], [0.0], [float(handle_radius_mm)]])
+    t_handle = tvec.reshape(3, 1) - R_marker @ offset
 
     rvec_handle, _ = cv2.Rodrigues(R_handle)
     return rvec_handle, t_handle
@@ -257,9 +297,24 @@ def stabilise(args):
     print(f"Layout: {args.faces} faces, IDs {marker_ids} "
           f"({360.0 / args.faces:g}° apart), dictionary {args.dict}")
 
+    # Distance from the handle axis to the marker surfaces
+    if args.handle_radius is None:
+        try:
+            handle_radius = estimate_handle_radius(args.marker_size, args.faces)
+        except ValueError as e:
+            sys.exit(f"{e}; pass --handle-radius")
+        print(f"Handle radius not given — estimated {handle_radius:.2f} mm "
+              f"({args.faces} faces of {args.marker_size} mm on a regular prism). "
+              f"Pass --handle-radius for accuracy.")
+    else:
+        handle_radius = args.handle_radius
+
     # Output
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(args.out, fourcc, fps, (width, height))
+    if not out.isOpened():
+        print(f"Cannot open output video for writing: {args.out}")
+        sys.exit(1)
     if args.frames_dir:
         os.makedirs(args.frames_dir, exist_ok=True)
 
@@ -272,7 +327,9 @@ def stabilise(args):
     start_search = args.reference if args.reference >= 0 else 0
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_search)
 
-    for search_idx in range(start_search, min(start_search + 120, total)):
+    # Do not bound this by CAP_PROP_FRAME_COUNT: some containers/backends
+    # report 0 frames. The loop stops at end of video via cap.read().
+    for search_idx in range(start_search, start_search + 120):
         ret, frame = cap.read()
         if not ret:
             break
@@ -284,7 +341,7 @@ def stabilise(args):
                 if mid in marker_ids:
                     rv, tv = pose_from_marker(
                         [corners[i]], mid, args.marker_size, cam_mat, dist,
-                        marker_ids, face_angles
+                        handle_radius, marker_ids, face_angles
                     )
                     if rv is not None:
                         ref_rvec = rv
@@ -311,6 +368,13 @@ def stabilise(args):
     last_H       = None
     frame_idx    = 0
 
+    # Optional temporal smoothing / dropout extrapolation of the handle pose
+    smoother = None
+    if args.smooth < 1.0 or args.max_extrapolate > 0:
+        smoother = PoseSmoother(args.smooth, args.max_extrapolate)
+        print(f"Pose smoothing: alpha={args.smooth}, "
+              f"extrapolate up to {args.max_extrapolate} frames")
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -330,10 +394,12 @@ def stabilise(args):
                     continue
                 rv, tv = pose_from_marker(
                     [corners[i]], mid, args.marker_size, cam_mat, dist,
-                    marker_ids, face_angles
+                    handle_radius, marker_ids, face_angles
                 )
                 if rv is None:
                     continue
+                if smoother is not None:
+                    rv, tv = smoother.update(rv, tv)
 
                 H = poses_to_homography(
                     ref_rvec, ref_tvec, rv, tv,
@@ -355,8 +421,22 @@ def stabilise(args):
                         )
                     break
 
+        if not found and smoother is not None:
+            pose = smoother.predict()
+            if pose is not None:
+                H = poses_to_homography(ref_rvec, ref_tvec, *pose,
+                                        cam_mat, dist, args.marker_size)
+                if H is not None:
+                    last_H = H
+                    extrapolating = smoother.missed <= args.max_extrapolate
+                    status_text = ("PREDICTED (no marker)" if extrapolating
+                                   else "HELD (no marker)")
+
         if not found:
-            if last_H is not None:
+            if status_text != "LOST":
+                warp_frame = cv2.warpPerspective(frame, last_H, (width, height))
+                n_fallback += 1
+            elif last_H is not None:
                 warp_frame = cv2.warpPerspective(frame, last_H, (width, height))
                 status_text = "HELD (no marker)"
                 n_fallback += 1
@@ -404,6 +484,9 @@ if __name__ == "__main__":
     parser.add_argument("--video",       required=True)
     parser.add_argument("--marker-size", type=float, required=True,
                         help="Marker side length in mm")
+    parser.add_argument("--handle-radius", type=float, default=None,
+                        help="Handle axis to marker surface distance in mm "
+                             "(default: marker_size / (2 tan(pi/faces)))")
     parser.add_argument("--camera",      default=None)
     parser.add_argument("--out",         default="stabilised.mp4")
     parser.add_argument("--reference",   type=int, default=0,
@@ -416,5 +499,9 @@ if __name__ == "__main__":
                         help="Marker ID on face 0 (faces use consecutive IDs)")
     parser.add_argument("--dict",        default="4X4_50", choices=sorted(DICTS),
                         help="ArUco dictionary the markers were printed from")
+    parser.add_argument("--smooth",      type=float, default=1.0,
+                        help="Pose smoothing weight in (0,1]; 1 = off")
+    parser.add_argument("--max-extrapolate", type=int, default=0,
+                        help="Frames to extrapolate motion through a dropout")
     args = parser.parse_args()
     stabilise(args)

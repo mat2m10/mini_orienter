@@ -136,8 +136,11 @@ class DeBruijnDetector:
             'found'       : bool
             'rvec'        : rotation vector (solvePnP) or None
             'tvec'        : translation vector or None
-            'cell_angle'  : absolute angle of cell 0 in image (radians) or None
             'debug_frame' : annotated frame if debug=True
+          and, when the strip was decoded:
+            'ellipse'     : fitted strip ellipse (OpenCV RotatedRect tuple)
+            'start_idx'   : sequence cell index at sample position 0
+            'confidence'  : fraction of cells matching the sequence (0-1)
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         debug_frame = frame.copy() if self.debug else None
@@ -183,8 +186,10 @@ class DeBruijnDetector:
             self._draw_debug(debug_frame, ellipse, sample_pts_2d,
                              bits, start_idx, rvec, tvec)
 
+        # 'found' means the strip was located and decoded. rvec/tvec are
+        # None without a camera matrix; callers then use the 2D path.
         return {
-            'found': rvec is not None,
+            'found': True,
             'rvec': rvec,
             'tvec': tvec,
             'ellipse': ellipse,
