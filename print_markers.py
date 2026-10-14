@@ -18,7 +18,7 @@ import argparse, math, sys
 try:
     import cv2, cv2.aruco as aruco, numpy as np
 except ImportError:
-    print("pip install opencv-python numpy"); sys.exit(1)
+    print("pip install -r requirements.txt"); sys.exit(1)
 
 def get_bits(mid):
     """Returns 2D list: 0=black, 1=white for a 6x6 DICT_4X4_50 marker."""
