@@ -25,19 +25,18 @@ import json
 import cv2
 import numpy as np
 
+from pose_smoothing import quat_from_matrix
+
 FIELDS = ["frame", "detected", "marker_id",
           "rx", "ry", "rz", "tx", "ty", "tz",
           "qw", "qx", "qy", "qz", "yaw_deg"]
 
 
 def quat_from_rvec(rvec):
-    """Unit quaternion (w, x, y, z) from a Rodrigues rotation vector."""
-    r = np.asarray(rvec, dtype=np.float64).reshape(3)
-    angle = np.linalg.norm(r)
-    if angle < 1e-12:
-        return np.array([1.0, 0.0, 0.0, 0.0])
-    axis = r / angle
-    return np.concatenate([[np.cos(angle / 2)], np.sin(angle / 2) * axis])
+    """Unit quaternion (w, x, y, z) from a Rodrigues rotation vector, w >= 0."""
+    R, _ = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))
+    q = quat_from_matrix(R)
+    return -q if q[0] < 0 else q
 
 
 def relative_yaw_deg(rvec_ref, rvec_cur):

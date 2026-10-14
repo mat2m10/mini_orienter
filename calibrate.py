@@ -85,7 +85,16 @@ def load_frames_from_images(pattern):
     if not paths:
         print(f"No images found matching: {pattern}")
         sys.exit(1)
-    frames = [cv2.imread(p) for p in paths]
+    frames = []
+    for p in paths:
+        img = cv2.imread(p)
+        if img is None:
+            print(f"  Skipping unreadable image: {p}")
+            continue
+        frames.append(img)
+    if not frames:
+        print("None of the images could be read.")
+        sys.exit(1)
     print(f"Loaded {len(frames)} images.")
     return frames
 
