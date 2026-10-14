@@ -42,15 +42,6 @@ def load_camera(path):
     return cam, dist
 
 
-def rvec_tvec_to_matrix(rvec, tvec):
-    """Convert OpenCV pose to 4x4 homogeneous matrix."""
-    R, _ = cv2.Rodrigues(rvec)
-    M = np.eye(4)
-    M[:3,:3] = R
-    M[:3, 3] = tvec.ravel()
-    return M
-
-
 def compute_warp_homography(ref_pts, cur_pts):
     """
     2D fallback: compute homography between reference and current
@@ -126,7 +117,6 @@ def stabilise(args):
 
     ref_rvec   = ref_result.get('rvec')
     ref_tvec   = ref_result.get('tvec')
-    ref_pts    = ref_result.get('debug_frame')  # not used here
     ref_ellipse = ref_result.get('ellipse')
     print(f"Reference pose found. start_idx={ref_result['start_idx']}, "
           f"confidence={ref_result['confidence']:.2f}")
@@ -151,12 +141,8 @@ def stabilise(args):
         if result['found']:
             if use_3d and ref_rvec is not None and result['rvec'] is not None:
                 # --- 3D pose stabilisation ---
-                # Compute relative transform: ref_pose * inv(cur_pose)
-                M_ref = rvec_tvec_to_matrix(ref_rvec, ref_tvec)
-                M_cur = rvec_tvec_to_matrix(result['rvec'], result['tvec'])
-                M_rel = M_ref @ np.linalg.inv(M_cur)
-
-                # Project 4 base corners to get homography
+                # Project 4 base corners with both poses; the homography
+                # between the two projections is the stabilising warp.
                 corners_3d = np.array([
                     [ args.radius,  args.radius, 0],
                     [-args.radius,  args.radius, 0],
@@ -165,8 +151,6 @@ def stabilise(args):
                 ], dtype=np.float32)
 
                 # Project using current pose
-                cur_r, _ = cv2.Rodrigues(M_cur[:3,:3])
-                cur_t    = M_cur[:3, 3]
                 pts_cur, _ = cv2.projectPoints(corners_3d, result['rvec'],
                                                result['tvec'], cam_mat, dist_coeffs)
 
