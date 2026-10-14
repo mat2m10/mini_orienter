@@ -39,6 +39,9 @@ Arguments:
                    e.g. 0.5 averages SLERP-wise with the previous pose
     --max-extrapolate  Frames to extrapolate the last motion through a
                    marker dropout before holding (default 0 = hold)
+    --pose-out     Write the per-frame handle pose/orientation to this
+                   .csv or .json file (see pose_export.py for columns)
+    --no-video     Do not write the stabilised video (use with --pose-out)
 """
 
 import cv2
@@ -47,6 +50,7 @@ import numpy as np
 import argparse
 import os
 import sys
+from pose_export import pose_record, write_poses
 from pose_smoothing import PoseSmoother
 
 
@@ -310,11 +314,16 @@ def stabilise(args):
         handle_radius = args.handle_radius
 
     # Output
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(args.out, fourcc, fps, (width, height))
-    if not out.isOpened():
-        print(f"Cannot open output video for writing: {args.out}")
-        sys.exit(1)
+    out = None
+    if not args.no_video:
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(args.out, fourcc, fps, (width, height))
+        if not out.isOpened():
+            print(f"Cannot open output video for writing: {args.out}")
+            sys.exit(1)
+    elif not args.pose_out:
+        print("Warning: --no-video without --pose-out writes no output.")
+    pose_records = [] if args.pose_out else None
     if args.frames_dir:
         os.makedirs(args.frames_dir, exist_ok=True)
 
@@ -386,6 +395,7 @@ def stabilise(args):
         warp_frame = frame.copy()
         status_text = "LOST"
         found = False
+        record = pose_record(frame_idx)
 
         if ids is not None:
             # Try each detected marker — use first valid one
@@ -407,6 +417,7 @@ def stabilise(args):
                 )
                 if H is not None:
                     last_H = H
+                    record = pose_record(frame_idx, mid, rv, tv, ref_rvec)
                     warp_frame = cv2.warpPerspective(frame, H, (width, height))
                     status_text = f"OK  marker={mid}"
                     n_stabilised += 1
@@ -448,7 +459,11 @@ def stabilise(args):
         cv2.putText(warp_frame, f"[{frame_idx:04d}] {status_text}",
                     (10, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
 
-        out.write(warp_frame)
+        if pose_records is not None:
+            pose_records.append(record)
+
+        if out is not None:
+            out.write(warp_frame)
 
         if args.frames_dir:
             cv2.imwrite(
@@ -468,7 +483,10 @@ def stabilise(args):
         frame_idx += 1
 
     cap.release()
-    out.release()
+    if out is not None:
+        out.release()
+    if pose_records is not None:
+        write_poses(args.pose_out, pose_records)
     if args.debug:
         cv2.destroyAllWindows()
 
@@ -476,7 +494,10 @@ def stabilise(args):
     print(f"  Stabilised : {n_stabilised}")
     print(f"  Held       : {n_fallback}  (marker lost, used last known warp)")
     print(f"  Lost       : {n_lost}      (no warp available at all)")
-    print(f"  Output     : {args.out}")
+    if out is not None:
+        print(f"  Output     : {args.out}")
+    if pose_records is not None:
+        print(f"  Poses      : {args.pose_out}  ({len(pose_records)} frames)")
 
 
 if __name__ == "__main__":
@@ -503,5 +524,9 @@ if __name__ == "__main__":
                         help="Pose smoothing weight in (0,1]; 1 = off")
     parser.add_argument("--max-extrapolate", type=int, default=0,
                         help="Frames to extrapolate motion through a dropout")
+    parser.add_argument("--pose-out",    default=None,
+                        help="Write per-frame handle pose to this .csv/.json")
+    parser.add_argument("--no-video",    action="store_true",
+                        help="Skip writing the stabilised video")
     args = parser.parse_args()
     stabilise(args)

@@ -67,6 +67,8 @@ python detect_aruco.py --image photo.jpg --dict 4X4_50
 | `--reference` | Start searching for the reference pose from this frame (default 0); the first frame with a visible marker becomes the reference |
 | `--debug` | Show a live preview with detected markers and axes |
 | `--frames-dir` | Also save each output frame as PNG here |
+| `--pose-out` | Write the per-frame handle pose (rotation vector, position, quaternion, yaw relative to the reference) to this `.csv` or `.json` file; columns are described in `pose_export.py` |
+| `--no-video` | Skip writing the stabilised video (use with `--pose-out`) |
 
 ### `print_markers.py` flags
 
