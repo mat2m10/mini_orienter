@@ -33,7 +33,10 @@ pip install "opencv-contrib-python>=4.7" numpy
 python print_markers.py --diameter 22 --out markers.svg
 
 # 2. Cut them out and glue IDs 0, 1, 2, 3 around the handle at 90° steps,
-#    all upright and in the same direction.
+#    all upright and in the same direction. Order: with ID 0 facing you,
+#    ID 1 is on its right (IDs increase counter-clockwise seen from above).
+#    Other layouts, e.g. the hexagonal fiducial: N markers on a regular
+#    N-sided prism, same order, then pass --faces N (and --dict/--first-id).
 
 # 3. (Optional, better accuracy) calibrate your camera once, see below.
 
@@ -55,6 +58,10 @@ python detect_aruco.py --image photo.jpg --dict 4X4_50
 |------|---------|
 | `--video` | Input video (required) |
 | `--marker-size` | Marker side length in mm (required) |
+| `--handle-radius` | Distance from the handle axis to the marker surfaces in mm. Default: estimated as `marker-size / (2 tan(pi/faces))`, i.e. a prism whose faces are exactly one marker wide; pass the measured value for accuracy |
+| `--faces` | Number of marker faces around the handle (default 4; 6 for a hexagonal prism) |
+| `--first-id` | Marker ID on face 0; the other faces use consecutive IDs (default 0) |
+| `--dict` | ArUco dictionary the markers were printed from (default `4X4_50`) |
 | `--camera` | `camera.yml` from `calibrate.py`. Without it a rough camera matrix (focal length = image width) is used |
 | `--out` | Output video (default `stabilised.mp4`) |
 | `--reference` | Start searching for the reference pose from this frame (default 0); the first frame with a visible marker becomes the reference |
@@ -65,9 +72,10 @@ python detect_aruco.py --image photo.jpg --dict 4X4_50
 
 | Flag | Meaning |
 |------|---------|
-| `--diameter` | Handle diameter in mm; marker size = circumference / 4 |
+| `--diameter` | Handle diameter in mm; marker size = circumference / faces |
+| `--faces` | Markers around the handle (default 4); sets the default IDs and `--diameter` sizing |
 | `--size` | Marker size in mm (overrides `--diameter`; default 20) |
-| `--ids` | Marker IDs to print (default `0 1 2 3`) |
+| `--ids` | Marker IDs to print (default `0 .. faces-1`) |
 | `--margin` | White border around each marker in mm (default 3) |
 | `--out` | Output SVG (default `markers.svg`) |
 

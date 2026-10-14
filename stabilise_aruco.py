@@ -9,23 +9,32 @@ Setup:
   - Print print_markers.py output (markers.svg), cut out the 4 markers
   - Glue them around your cork/handle at 90° intervals
   - Each marker is a different ID so OpenCV knows which face it's seeing
+  - Other layouts: N markers on a regular N-sided prism (e.g. the
+    hexagonal fiducial from generate_aruco: --faces 6), IDs first-id ..
+    first-id+N-1 in order around the axis, all upright, same direction.
+    Order: with face 0 facing you, face 1 is on its right (IDs increase
+    counter-clockwise seen from the top of the handle, +k*360/N about +Y)
 
 Usage:
     python stabilise_aruco.py --video data/knight.mp4 --marker-size 20
     python stabilise_aruco.py --video data/knight.mp4 --marker-size 20 --camera camera.yml
     python stabilise_aruco.py --video data/knight.mp4 --marker-size 20 --debug
+    python stabilise_aruco.py --video data/knight.mp4 --marker-size 20 --faces 6
 
 Arguments:
     --video        Input video file
     --marker-size  Physical side length of each marker in mm
     --handle-radius  Distance from the handle axis to each marker's surface
-                   in mm (default: estimated as 2*marker_size/pi, i.e. four
-                   markers wrapping the full circumference)
+                   in mm (default: estimated as marker_size / (2 tan(pi/faces)),
+                   the apothem of a prism whose faces are one marker wide)
     --camera       Optional camera.yml from calibrate.py (improves accuracy)
     --out          Output video (default: stabilised.mp4)
     --reference    Frame number to use as locked reference pose (default: auto)
     --debug        Show live annotated preview
     --frames-dir   Also save individual PNG frames here
+    --faces        Number of marker faces around the axis (default 4)
+    --first-id     Marker ID on face 0; faces use consecutive IDs (default 0)
+    --dict         ArUco dictionary, e.g. 4X4_50 (default), 5X5_100, 6X6_250
     --smooth       Pose smoothing weight in (0, 1]; 1 = off (default).
                    e.g. 0.5 averages SLERP-wise with the previous pose
     --max-extrapolate  Frames to extrapolate the last motion through a
@@ -44,11 +53,49 @@ from pose_smoothing import PoseSmoother
 # ---------------------------------------------------------------------------
 # Marker layout: which ID is on which face of the handle
 # Each marker is rotated around the Y axis by face_angle degrees
-# 4 markers at 90° intervals covers a full cylinder
+# Default: 4 markers at 90° intervals covers a full cylinder
 # ---------------------------------------------------------------------------
 
-MARKER_IDS   = [0, 1, 2, 3]          # IDs printed on the strip sheet
-FACE_ANGLES  = [0, 90, 180, 270]     # degrees around cylinder axis
+DICTS = {
+    "4X4_50":  aruco.DICT_4X4_50,
+    "4X4_100": aruco.DICT_4X4_100,
+    "4X4_250": aruco.DICT_4X4_250,
+    "5X5_50":  aruco.DICT_5X5_50,
+    "5X5_100": aruco.DICT_5X5_100,
+    "5X5_250": aruco.DICT_5X5_250,
+    "6X6_50":  aruco.DICT_6X6_50,
+    "6X6_100": aruco.DICT_6X6_100,
+    "6X6_250": aruco.DICT_6X6_250,
+    "ORIGINAL": aruco.DICT_ARUCO_ORIGINAL,
+}
+
+
+def face_layout(n_faces=4, first_id=0):
+    """
+    Marker IDs and face angles (degrees around the handle's Y axis) for a
+    regular N-sided prism: face k carries ID first_id + k at k * 360/N.
+    """
+    if n_faces < 1:
+        raise ValueError("n_faces must be >= 1")
+    ids = [first_id + k for k in range(n_faces)]
+    angles = [360.0 * k / n_faces for k in range(n_faces)]
+    return ids, angles
+
+
+MARKER_IDS, FACE_ANGLES = face_layout(4)   # [0..3], [0, 90, 180, 270]
+
+
+def estimate_handle_radius(marker_size_mm, n_faces=4):
+    """
+    Default distance from the handle axis to the marker surfaces when
+    --handle-radius is not given: the apothem of a regular N-sided prism
+    whose faces are exactly one marker wide, s / (2 tan(pi/N)).
+    Markers with a white margin or glued on a round handle sit further out,
+    so pass --handle-radius when the real value is known.
+    """
+    if n_faces < 3:
+        raise ValueError("a handle radius can only be estimated for >= 3 faces")
+    return marker_size_mm / (2.0 * np.tan(np.pi / n_faces))
 
 def marker_offset_rotation(face_angle_deg):
     """
@@ -107,9 +154,9 @@ def default_camera(w, h):
 # ArUco setup
 # ---------------------------------------------------------------------------
 
-def make_detector():
+def make_detector(dict_id=aruco.DICT_4X4_50):
     """Create ArUco detector with tuned parameters for small hand-drawn markers."""
-    dictionary = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
+    dictionary = aruco.getPredefinedDictionary(dict_id)
     params = aruco.DetectorParameters()
 
     # More aggressive corner refinement — helps with pencil-drawn or printed markers
@@ -133,7 +180,7 @@ def make_detector():
 # ---------------------------------------------------------------------------
 
 def pose_from_marker(corners, marker_id, marker_size_mm, cam_mat, dist,
-                     handle_radius_mm=0.0):
+                     handle_radius_mm=0.0, marker_ids=None, face_angles=None):
     """
     Estimate the pose of the HANDLE given a detected marker.
 
@@ -168,8 +215,11 @@ def pose_from_marker(corners, marker_id, marker_size_mm, cam_mat, dist,
         return None, None
 
     # Convert marker pose to handle pose using known face angle
-    face_idx = MARKER_IDS.index(marker_id) if marker_id in MARKER_IDS else 0
-    face_angle = FACE_ANGLES[face_idx]
+    if marker_ids is None:
+        marker_ids, face_angles = MARKER_IDS, FACE_ANGLES
+    if marker_id not in marker_ids:
+        return None, None
+    face_angle = face_angles[marker_ids.index(marker_id)]
 
     R_marker, _ = cv2.Rodrigues(rvec)
     R_face = marker_offset_rotation(face_angle)
@@ -241,17 +291,23 @@ def stabilise(args):
     else:
         cam_mat, dist = default_camera(width, height)
 
+    # Detector and marker layout
+    detector, dictionary = make_detector(DICTS[args.dict])
+    marker_ids, face_angles = face_layout(args.faces, args.first_id)
+    print(f"Layout: {args.faces} faces, IDs {marker_ids} "
+          f"({360.0 / args.faces:g}° apart), dictionary {args.dict}")
+
     # Distance from the handle axis to the marker surfaces
     if args.handle_radius is None:
-        handle_radius = 2.0 * args.marker_size / np.pi
+        try:
+            handle_radius = estimate_handle_radius(args.marker_size, args.faces)
+        except ValueError as e:
+            sys.exit(f"{e}; pass --handle-radius")
         print(f"Handle radius not given — estimated {handle_radius:.2f} mm "
-              f"(4 markers of {args.marker_size} mm around the circumference). "
+              f"({args.faces} faces of {args.marker_size} mm on a regular prism). "
               f"Pass --handle-radius for accuracy.")
     else:
         handle_radius = args.handle_radius
-
-    # Detector
-    detector, dictionary = make_detector()
 
     # Output
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -282,10 +338,10 @@ def stabilise(args):
         if ids is not None:
             # Use first detected marker
             for i, mid in enumerate(ids.ravel()):
-                if mid in MARKER_IDS:
+                if mid in marker_ids:
                     rv, tv = pose_from_marker(
                         [corners[i]], mid, args.marker_size, cam_mat, dist,
-                        handle_radius
+                        handle_radius, marker_ids, face_angles
                     )
                     if rv is not None:
                         ref_rvec = rv
@@ -334,11 +390,11 @@ def stabilise(args):
         if ids is not None:
             # Try each detected marker — use first valid one
             for i, mid in enumerate(ids.ravel()):
-                if mid not in MARKER_IDS:
+                if mid not in marker_ids:
                     continue
                 rv, tv = pose_from_marker(
                     [corners[i]], mid, args.marker_size, cam_mat, dist,
-                    handle_radius
+                    handle_radius, marker_ids, face_angles
                 )
                 if rv is None:
                     continue
@@ -430,13 +486,19 @@ if __name__ == "__main__":
                         help="Marker side length in mm")
     parser.add_argument("--handle-radius", type=float, default=None,
                         help="Handle axis to marker surface distance in mm "
-                             "(default: 2*marker_size/pi)")
+                             "(default: marker_size / (2 tan(pi/faces)))")
     parser.add_argument("--camera",      default=None)
     parser.add_argument("--out",         default="stabilised.mp4")
     parser.add_argument("--reference",   type=int, default=0,
                         help="Start searching for reference pose from this frame")
     parser.add_argument("--debug",       action="store_true")
     parser.add_argument("--frames-dir",  default=None)
+    parser.add_argument("--faces",       type=int, default=4,
+                        help="Marker faces around the axis (6 for a hexagonal prism)")
+    parser.add_argument("--first-id",    type=int, default=0,
+                        help="Marker ID on face 0 (faces use consecutive IDs)")
+    parser.add_argument("--dict",        default="4X4_50", choices=sorted(DICTS),
+                        help="ArUco dictionary the markers were printed from")
     parser.add_argument("--smooth",      type=float, default=1.0,
                         help="Pose smoothing weight in (0,1]; 1 = off")
     parser.add_argument("--max-extrapolate", type=int, default=0,

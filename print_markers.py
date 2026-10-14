@@ -9,6 +9,8 @@ Usage:
 
 Arguments:
     --diameter   Handle/base diameter in mm
+    --faces      Markers around the handle (default 4); sets default IDs
+                 and the --diameter sizing (circumference / faces)
     --size       Marker size in mm (overrides diameter-based sizing)
     --margin     White border around each marker in mm (default 3)
     --out        Output SVG filename
@@ -106,9 +108,10 @@ def make_svg(ids, marker_mm, margin_mm, out_path):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--diameter", type=float, default=None, help="Handle diameter mm (sets marker size to circumference/4)")
+    p.add_argument("--diameter", type=float, default=None, help="Handle diameter mm (sets marker size to circumference/faces)")
     p.add_argument("--size",     type=float, default=None, help="Marker size in mm (overrides --diameter)")
-    p.add_argument("--ids",      nargs="+",  type=int, default=[0,1,2,3])
+    p.add_argument("--faces",    type=int,   default=4, help="Markers around the handle (default 4)")
+    p.add_argument("--ids",      nargs="+",  type=int, default=None, help="Marker IDs (default 0..faces-1)")
     p.add_argument("--margin",   type=float, default=3.0)
     p.add_argument("--out",      default="markers.svg")
     a = p.parse_args()
@@ -116,8 +119,9 @@ if __name__ == "__main__":
     if a.size:
         marker_mm = a.size
     elif a.diameter:
-        marker_mm = (math.pi * a.diameter) / 4
+        marker_mm = (math.pi * a.diameter) / a.faces
     else:
         marker_mm = 20.0   # sensible default
 
-    make_svg(a.ids, marker_mm, a.margin, a.out)
+    ids = a.ids if a.ids is not None else list(range(a.faces))
+    make_svg(ids, marker_mm, a.margin, a.out)
