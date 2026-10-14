@@ -48,8 +48,9 @@ import cv2
 import cv2.aruco as aruco
 import numpy as np
 import argparse
-import os
 import sys
+from common import (DICTS, FrameSink, default_camera, load_camera,
+                    make_aruco_detector, open_video, print_progress)
 from pose_export import pose_record, write_poses
 from pose_smoothing import PoseSmoother
 
@@ -59,20 +60,6 @@ from pose_smoothing import PoseSmoother
 # Each marker is rotated around the Y axis by face_angle degrees
 # Default: 4 markers at 90° intervals covers a full cylinder
 # ---------------------------------------------------------------------------
-
-DICTS = {
-    "4X4_50":  aruco.DICT_4X4_50,
-    "4X4_100": aruco.DICT_4X4_100,
-    "4X4_250": aruco.DICT_4X4_250,
-    "5X5_50":  aruco.DICT_5X5_50,
-    "5X5_100": aruco.DICT_5X5_100,
-    "5X5_250": aruco.DICT_5X5_250,
-    "6X6_50":  aruco.DICT_6X6_50,
-    "6X6_100": aruco.DICT_6X6_100,
-    "6X6_250": aruco.DICT_6X6_250,
-    "ORIGINAL": aruco.DICT_ARUCO_ORIGINAL,
-}
-
 
 def face_layout(n_faces=4, first_id=0):
     """
@@ -112,71 +99,6 @@ def marker_offset_rotation(face_angle_deg):
         [         0, 1,         0],
         [-np.sin(a), 0, np.cos(a)],
     ], dtype=np.float64)
-
-
-# ---------------------------------------------------------------------------
-# Camera calibration loader
-# ---------------------------------------------------------------------------
-
-def load_camera(path):
-    if not os.path.isfile(path):
-        sys.exit(f"Camera file not found: {path}")
-    fs = cv2.FileStorage(path, cv2.FILE_STORAGE_READ)
-    if not fs.isOpened():
-        sys.exit(f"Cannot read camera file: {path}")
-    cam  = fs.getNode("camera_matrix").mat()
-    dist = fs.getNode("dist_coeffs").mat()
-    fs.release()
-    if cam is None or cam.shape != (3, 3):
-        sys.exit(f"{path}: missing or invalid 'camera_matrix' "
-                 f"(expected 3x3, run calibrate.py)")
-    if dist is None or dist.size == 0:
-        sys.exit(f"{path}: missing 'dist_coeffs' (run calibrate.py)")
-    print(f"Loaded calibration from {path}")
-    return cam, dist
-
-
-def default_camera(w, h):
-    """
-    Rough camera matrix when no calibration file is available.
-    Assumes focal length ≈ image width (reasonable for phone cameras).
-    Good enough for stabilisation, not for metric measurements.
-    """
-    f = w  # focal length estimate in pixels
-    cam = np.array([
-        [f,   0, w/2],
-        [0,   f, h/2],
-        [0,   0,   1],
-    ], dtype=np.float64)
-    dist = np.zeros((4,1), dtype=np.float64)
-    print("No calibration file — using estimated camera matrix (focal = image width).")
-    print("For better results run: python calibrate.py --video checkerboard.mp4")
-    return cam, dist
-
-
-# ---------------------------------------------------------------------------
-# ArUco setup
-# ---------------------------------------------------------------------------
-
-def make_detector(dict_id=aruco.DICT_4X4_50):
-    """Create ArUco detector with tuned parameters for small hand-drawn markers."""
-    dictionary = aruco.getPredefinedDictionary(dict_id)
-    params = aruco.DetectorParameters()
-
-    # More aggressive corner refinement — helps with pencil-drawn or printed markers
-    params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
-
-    # Allow smaller markers (important for a cork-sized handle)
-    params.minMarkerPerimeterRate = 0.03
-    params.maxMarkerPerimeterRate = 4.0
-
-    # More lenient thresholding — helps with uneven pencil/print quality
-    params.adaptiveThreshWinSizeMin  = 3
-    params.adaptiveThreshWinSizeMax  = 53
-    params.adaptiveThreshWinSizeStep = 10
-
-    detector = aruco.ArucoDetector(dictionary, params)
-    return detector, dictionary
 
 
 # ---------------------------------------------------------------------------
@@ -278,16 +200,7 @@ def poses_to_homography(rvec_ref, tvec_ref, rvec_cur, tvec_cur,
 # ---------------------------------------------------------------------------
 
 def stabilise(args):
-    cap = cv2.VideoCapture(args.video)
-    if not cap.isOpened():
-        print(f"Cannot open: {args.video}")
-        sys.exit(1)
-
-    fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    print(f"Video: {width}x{height} @ {fps:.1f}fps, {total} frames")
+    cap, fps, width, height, total = open_video(args.video)
 
     # Camera matrix
     if args.camera:
@@ -296,7 +209,7 @@ def stabilise(args):
         cam_mat, dist = default_camera(width, height)
 
     # Detector and marker layout
-    detector, dictionary = make_detector(DICTS[args.dict])
+    detector, dictionary = make_aruco_detector(DICTS[args.dict])
     marker_ids, face_angles = face_layout(args.faces, args.first_id)
     print(f"Layout: {args.faces} faces, IDs {marker_ids} "
           f"({360.0 / args.faces:g}° apart), dictionary {args.dict}")
@@ -314,18 +227,11 @@ def stabilise(args):
         handle_radius = args.handle_radius
 
     # Output
-    out = None
-    if not args.no_video:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(args.out, fourcc, fps, (width, height))
-        if not out.isOpened():
-            print(f"Cannot open output video for writing: {args.out}")
-            sys.exit(1)
-    elif not args.pose_out:
+    if args.no_video and not args.pose_out:
         print("Warning: --no-video without --pose-out writes no output.")
+    out = FrameSink(None if args.no_video else args.out, fps, (width, height),
+                    args.frames_dir)
     pose_records = [] if args.pose_out else None
-    if args.frames_dir:
-        os.makedirs(args.frames_dir, exist_ok=True)
 
     # ---- Find reference frame ----
     ref_rvec = None
@@ -462,29 +368,20 @@ def stabilise(args):
         if pose_records is not None:
             pose_records.append(record)
 
-        if out is not None:
-            out.write(warp_frame)
-
-        if args.frames_dir:
-            cv2.imwrite(
-                f"{args.frames_dir}/frame_{frame_idx:04d}.png", warp_frame
-            )
+        out.write(warp_frame, frame_idx)
 
         if args.debug:
             cv2.imshow("Stabilised", warp_frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
-        if frame_idx % 30 == 0:
-            pct = 100 * frame_idx / max(total, 1)
-            print(f"  {frame_idx}/{total} ({pct:.0f}%)  "
-                  f"ok={n_stabilised} held={n_fallback} lost={n_lost}")
+        print_progress(frame_idx, total, ok=n_stabilised, held=n_fallback,
+                       lost=n_lost)
 
         frame_idx += 1
 
     cap.release()
-    if out is not None:
-        out.release()
+    out.release()
     if pose_records is not None:
         write_poses(args.pose_out, pose_records)
     if args.debug:
@@ -494,7 +391,7 @@ def stabilise(args):
     print(f"  Stabilised : {n_stabilised}")
     print(f"  Held       : {n_fallback}  (marker lost, used last known warp)")
     print(f"  Lost       : {n_lost}      (no warp available at all)")
-    if out is not None:
+    if not args.no_video:
         print(f"  Output     : {args.out}")
     if pose_records is not None:
         print(f"  Poses      : {args.pose_out}  ({len(pose_records)} frames)")
