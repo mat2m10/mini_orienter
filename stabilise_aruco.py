@@ -6,7 +6,7 @@ a cylindrical handle/base. At least one marker is always visible
 regardless of orientation.
 
 Setup:
-  - Print markers_sheet.py output, cut into 4 strips
+  - Print print_markers.py output (markers.svg), cut out the 4 markers
   - Glue them around your cork/handle at 90° intervals
   - Each marker is a different ID so OpenCV knows which face it's seeing
 
